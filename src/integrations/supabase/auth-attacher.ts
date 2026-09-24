@@ -6,10 +6,19 @@ import { supabase } from './client'
 // the browser never attaches the bearer token to serverFn RPCs.
 export const attachSupabaseAuth = createMiddleware({ type: 'function' }).client(
   async ({ next }) => {
-    const { data } = await supabase.auth.getSession()
-    const token = data.session?.access_token
-    return next({
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    // The client Supabase SDK may not have hydrated the session immediately
+    // when this middleware runs during app startup. Try once, then retry
+    // after a short delay to give auth state time to initialize.
+    let { data } = await supabase.auth.getSession();
+    let token = data.session?.access_token;
+    if (!token) {
+      // brief retry to allow auth rehydration (avoids spurious unauthorised errors)
+      await new Promise((r) => setTimeout(r, 150));
+      const retry = await supabase.auth.getSession();
+      data = retry.data;
+      token = data.session?.access_token;
+    }
+
+    return next({ headers: token ? { Authorization: `Bearer ${token}` } : {} });
   },
 )
