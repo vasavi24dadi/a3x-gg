@@ -81,7 +81,7 @@ export function AdminControl() {
   const [tab, setTab] = useState("command");
   const [openRow, setOpenRow] = useState<CustomerRow | null>(null);
 
-  const { data: raw, isLoading, refetch, isFetching } = useQuery({
+  const { data: raw, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["admin-control-data"],
     queryFn: () => getAdminControlData(),
     staleTime: 60_000,
@@ -158,7 +158,15 @@ export function AdminControl() {
         </div>
       </header>
 
-      {isLoading || !d || !deep ? (
+      {isError ? (
+        <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-8 text-center text-sm text-destructive">
+          <p>Could not load the company record.</p>
+          <p className="mt-1 text-xs">{error instanceof Error ? error.message : "Please try again."}</p>
+          <Button size="sm" variant="outline" className="mt-3" onClick={() => refetch()} disabled={isFetching}>
+            Try again
+          </Button>
+        </div>
+      ) : isLoading || !d || !deep ? (
         <div className="rounded-xl border bg-card p-8 text-center text-sm text-muted-foreground">
           Loading the company record…
         </div>
