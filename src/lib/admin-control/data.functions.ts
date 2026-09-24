@@ -2,6 +2,7 @@
 // customers, work batches, next actions and history. Public read-only data only.
 import { createServerFn } from "@tanstack/react-start";
 import { createClient } from "@supabase/supabase-js";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 export interface ControlBatch {
   id: string;
@@ -208,11 +209,10 @@ export const getAdminCustomerHistory = createServerFn({ method: "GET" })
     ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   });
 
-export const getAdminControlData = createServerFn({ method: "GET" }).handler(async (): Promise<ControlData> => {
-  const db = createClient(process.env["SUPABASE_URL"]!, process.env["SUPABASE_PUBLISHABLE_KEY"]!, {
-    auth: { storage: undefined, persistSession: false, autoRefreshToken: false },
-  });
-
+export const getAdminControlData = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }): Promise<ControlData> => {
+  const db = context.supabase;
   const [batches, observations, leads, workBatches, workItems, actions, audit] = await Promise.all([
     db
       .from("screenshot_batches")
@@ -256,6 +256,9 @@ export const getAdminControlData = createServerFn({ method: "GET" }).handler(asy
       .order("at", { ascending: false })
       .limit(200),
   ]);
+
+  const failed = [batches, observations, leads, workBatches, workItems, actions, audit].find((result) => result.error);
+  if (failed?.error) throw new Error(`Admin control data load failed: ${failed.error.message}`);
 
   const meta = (value: unknown): Record<string, unknown> =>
     value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -368,4 +371,4 @@ export const getAdminControlData = createServerFn({ method: "GET" }).handler(asy
       at: a.at,
     })),
   };
-});
+  });
