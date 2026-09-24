@@ -50,6 +50,11 @@ export interface FlowLead {
   id: string;
   /** Shared identity used by Draft Vision, Movement, Admin and Booking Flow. */
   canonicalId?: string;
+  /** Present only when this local projection maps to one unique hosted leads.id. */
+  hostedLeadId?: string;
+  hostedNextActionId?: string | null;
+  hostedClaimId?: string | null;
+  hostedClaimError?: string | null;
   name: string;
   phone: string;
   waAccount: string;

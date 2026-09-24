@@ -1,10 +1,11 @@
 // Bridge — every WhatsApp conversation is guaranteed a CRM record.
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useIdentityStore } from "@/lib/lead-identity/store";
 import { useWa } from "@/wa/store";
 import { useMovement } from "./store";
 import type { MovementState } from "./types";
 import { normalizePhoneIN } from "@/lib/lead-identity/normalize";
+import { loadHostedMovementSeeds, type HostedMovementSeed } from "./hosted";
 
 /**
  * Auto-ingestion: keeps a Movement state for every known lead, matching on the
@@ -19,6 +20,7 @@ export function useMovementSync() {
   const ensureMany = useMovement((s) => s.ensureMany);
   const setActor = useMovement((s) => s.setActor);
   const states = useMovement((s) => s.states);
+  const [hosted, setHosted] = useState<HostedMovementSeed[]>([]);
 
   useEffect(() => {
     setActor({ id: me.id, name: me.name, role: "flow-ops", zone: "KORA CORE" });
@@ -39,10 +41,53 @@ export function useMovementSync() {
     );
   }, [leads, unread, claims, ensureMany]);
 
-  const list = useMemo(
-    () => leads.map((l) => states[l.ulid]).filter(Boolean) as MovementState[],
-    [leads, states],
-  );
+  useEffect(() => {
+    let alive = true;
+    void loadHostedMovementSeeds(leads.map((lead) => ({
+      ulid: lead.ulid,
+      phone: lead.phoneE164 || normalizePhoneIN(lead.phoneRaw || ""),
+      name: lead.name,
+    }))).then((rows) => {
+      if (alive) setHosted(rows);
+    }).catch((error) => {
+      console.warn("Hosted Movement data unavailable; local records remain active", error);
+    });
+    return () => { alive = false; };
+  }, [leads]);
+
+  useEffect(() => {
+    if (!hosted.length) return;
+    ensureMany(hosted.map((row) => ({
+      ulid: row.localUlid,
+      hostedLeadId: row.id,
+      hostedNextActionId: row.nextActionId,
+      hostedEvents: row.history,
+      name: row.name ?? undefined,
+      phone: row.phone ?? undefined,
+      zone: row.zone ?? undefined,
+      ownerId: "",
+      ownerName: row.ownerName,
+      unread: row.unread,
+      lastCustomerMsg: row.lastMessage,
+      lastCustomerMsgAt: row.lastMessage ? new Date().toISOString() : null,
+      checkInDate: row.moveInDate,
+      hostedState: {
+        hostedLeadId: row.id,
+        hostedNextActionId: row.nextActionId,
+        name: row.name ?? undefined,
+        phone: row.phone ?? undefined,
+        zone: row.zone ?? "",
+        stage: row.stage,
+        primaryOwnerName: row.ownerName,
+        nextAction: row.nextAction,
+        unread: row.unread,
+        lastCustomerMsg: row.lastMessage,
+        checkInDate: row.moveInDate,
+      },
+    })));
+  }, [hosted, ensureMany]);
+
+  const list = useMemo(() => Object.values(states), [states]);
 
   const nameOf = useMemo(() => {
     const m = new Map<string, { name: string; phone: string; area: string }>();
@@ -53,8 +98,15 @@ export function useMovementSync() {
         area: l.area || l.zone || "—",
       }),
     );
+    hosted.forEach((l) => {
+      if (!m.has(l.localUlid)) m.set(l.localUlid, {
+        name: l.name || l.phone || "Unknown",
+        phone: l.phone || "",
+        area: l.zone || "—",
+      });
+    });
     return m;
-  }, [leads]);
+  }, [leads, hosted]);
 
   return { list, nameOf, me };
 }

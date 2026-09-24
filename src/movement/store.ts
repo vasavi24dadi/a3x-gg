@@ -12,6 +12,14 @@ import {
 } from "./types";
 import { evaluateGoodLead } from "./priority";
 import { canonicalCustomerId } from "@/lib/canonical/customer-id";
+import {
+  appendHostedMovementEvent,
+  claimHostedMovementLead,
+  heartbeatHostedMovementClaim,
+  persistHostedMovementState,
+  persistHostedNextAction,
+  releaseHostedMovementClaim,
+} from "./hosted";
 
 const now = () => new Date().toISOString();
 const uid = (p: string) => `${p}-${Math.random().toString(36).slice(2, 9)}`;
@@ -32,6 +40,10 @@ export interface ShadowSeed {
   location?: string | null;
   roomType?: string | null;
   inBangalore?: boolean | null;
+  hostedLeadId?: string;
+  hostedNextActionId?: string | null;
+  hostedState?: Partial<MovementState>;
+  hostedEvents?: MovementEvent[];
 }
 
 export type ClaimResult = { ok: true } | { ok: false; holder: LiveLock };
@@ -119,6 +131,8 @@ export function blank(seed: ShadowSeed): MovementState {
   return {
     ulid: seed.ulid,
     canonicalId: canonicalCustomerId({ phone: seed.phone, name: seed.name }) || seed.ulid,
+    hostedLeadId: seed.hostedLeadId,
+    hostedNextActionId: seed.hostedNextActionId ?? null,
     name: seed.name,
     phone: seed.phone,
     waAccount: seed.waAccount ?? "Kora WA 1",
@@ -207,10 +221,16 @@ export const movementCreator: StateCreator<MovementStore> = (set, get) => ({
   ensureMany: (seeds) => {
     const cur = get().states;
     const add: Record<string, MovementState> = {};
+    const hydrate: Record<string, Partial<MovementState>> = {};
     const evs: MovementEvent[] = [];
+    const hostedEvents = seeds.flatMap((seed) => seed.hostedEvents ?? []);
     for (const seed of seeds) {
-      if (cur[seed.ulid] || add[seed.ulid]) continue;
+      if (cur[seed.ulid] || add[seed.ulid]) {
+        if (seed.hostedLeadId) hydrate[seed.ulid] = { hostedLeadId: seed.hostedLeadId, hostedNextActionId: seed.hostedNextActionId ?? null, ...seed.hostedState };
+        continue;
+      }
       add[seed.ulid] = blank(seed);
+      if (seed.hostedLeadId) hydrate[seed.ulid] = { hostedLeadId: seed.hostedLeadId, hostedNextActionId: seed.hostedNextActionId ?? null, ...seed.hostedState };
       evs.push({
         id: uid("ev"), ts: now(), ulid: seed.ulid, kind: "ingested",
         actorId: "system", actorName: "System",
@@ -218,7 +238,14 @@ export const movementCreator: StateCreator<MovementStore> = (set, get) => ({
       });
     }
     if (!Object.keys(add).length) return;
-    set((s) => ({ states: { ...s.states, ...add }, events: [...evs, ...s.events] }));
+    set((s) => ({
+      states: {
+        ...s.states,
+        ...add,
+        ...Object.fromEntries(Object.entries(hydrate).map(([ulid, patch]) => [ulid, { ...(s.states[ulid] ?? add[ulid]), ...patch, updatedAt: now() }])),
+      },
+      events: [...evs, ...hostedEvents.filter((event) => !s.events.some((existing) => existing.id === event.id)), ...s.events],
+    }));
   },
 
   log: (ulid, kind, text, extra) => {
@@ -227,14 +254,29 @@ export const movementCreator: StateCreator<MovementStore> = (set, get) => ({
       id: uid("ev"), ts: now(), ulid, kind, actorId: a.id, actorName: a.name, text, ...extra,
     };
     set((s) => ({ events: [ev, ...s.events].slice(0, 6000) }));
+    const state = get().states[ulid];
+    if (state?.hostedLeadId) void appendHostedMovementEvent(state, ev).catch((error) => console.warn("Movement history not synced", error));
     return ev;
   },
 
-  patch: (ulid, p) =>
+  patch: (ulid, p) => {
+    const before = get().states[ulid];
     set((s) => {
       const cur = s.states[ulid] ?? blank({ ulid });
       return { states: { ...s.states, [ulid]: { ...cur, ...p, updatedAt: now() } } };
-    }),
+    });
+    const next = get().states[ulid];
+    if (before?.hostedLeadId && next) {
+      void persistHostedMovementState(next, p).catch((error) => console.warn("Movement state not synced", error));
+      if (Object.prototype.hasOwnProperty.call(p, "nextAction")) {
+        void persistHostedNextAction(next, next.nextAction ?? null).then((id) => {
+          if (id && get().states[ulid]?.hostedNextActionId !== id) {
+            set((s) => ({ states: { ...s.states, [ulid]: { ...s.states[ulid]!, hostedNextActionId: id } } }));
+          }
+        }).catch((error) => console.warn("Movement next action not synced", error));
+      }
+    }
+  },
 
   toggleSelect: (ulid) =>
     set((s) => ({
@@ -338,16 +380,33 @@ export const movementCreator: StateCreator<MovementStore> = (set, get) => ({
       primaryOwnerName: st?.primaryOwnerId ? st.primaryOwnerName : a.name,
     });
     if (!held) get().log(ulid, "claimed", `Live lock by ${a.name} · ${objectiveText} · ${LOCK_TTL[objective]}m idle TTL`);
+    if (!held && st?.hostedLeadId) {
+      void claimHostedMovementLead(st.hostedLeadId, objective).then(({ claimId }) => {
+        if (get().locks[ulid]) {
+          set((s) => ({ locks: { ...s.locks, [ulid]: { ...s.locks[ulid]!, hostedClaimId: claimId } } }));
+        } else {
+          void releaseHostedMovementClaim(claimId).catch((error) => console.warn("Orphaned Movement claim release failed", error));
+        }
+      }).catch((error) => {
+        get().release(ulid);
+        get().log(ulid, "conflict", `Hosted claim failed: ${error instanceof Error ? error.message : "claim unavailable"}`, { actorId: "system", actorName: "System" });
+      });
+    }
     return { ok: true };
   },
 
-  touchLock: (ulid) =>
+  touchLock: (ulid) => {
     set((s) =>
       s.locks[ulid] ? { locks: { ...s.locks, [ulid]: { ...s.locks[ulid], lastTouchAt: now() } } } : {},
-    ),
+    );
+    const lock = get().locks[ulid];
+    if (lock?.hostedClaimId) void heartbeatHostedMovementClaim(lock.hostedClaimId).catch((error) => console.warn("Movement claim heartbeat failed", error));
+  },
 
   release: (ulid) => {
-    if (!get().locks[ulid]) return;
+    const existing = get().locks[ulid];
+    if (!existing) return;
+    if (existing.hostedClaimId) void releaseHostedMovementClaim(existing.hostedClaimId).catch((error) => console.warn("Movement claim release failed", error));
     set((s) => {
       const l = { ...s.locks };
       delete l[ulid];

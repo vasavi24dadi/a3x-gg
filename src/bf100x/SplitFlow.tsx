@@ -23,6 +23,7 @@ import { ClosingDesk } from "./ClosingDesk";
 import { ContactActions } from "@/components/common/ContactActions";
 import { CloseCommitButton } from "@/components/commitments/CloseCommitButton";
 import { canonicalCustomerId } from "@/lib/canonical/customer-id";
+import { loadHostedFlowMatches } from "@/bookingflow/hosted";
 
 type Pane = "WORK" | "CAPTURED" | "MATCH" | "LABELS" | "CLOSING" | "QUEUE" | "DRAFTS";
 
@@ -68,7 +69,7 @@ export interface SplitFocus { name?: string; phone?: string; key?: string; canon
 
 
 export function SplitFlow({ embedded = false, focus, panelOnly = false }: { embedded?: boolean; focus?: SplitFocus; panelOnly?: boolean }) {
-  const { leads, me, mode, setMode, claim, setNext, logActivity, escalate, batches, buildBatch, closeBatch, reopenBatch } = useBookingFlow();
+  const { leads, me, mode, setMode, claim, setNext, logActivity, escalate, batches, buildBatch, closeBatch, reopenBatch, hydrateHosted } = useBookingFlow();
   const [widthPct, setWidthPct] = useState(40);
   const [dragging, setDragging] = useState(false);
   const [closeNote, setCloseNote] = useState("");
@@ -102,6 +103,17 @@ export function SplitFlow({ embedded = false, focus, panelOnly = false }: { embe
   const [activityType, setActivityType] = useState("Call completed");
   const [activityNote, setActivityNote] = useState("");
   useEffect(() => setMounted(true), []);
+
+  useEffect(() => {
+    if (!leads.length) return;
+    let alive = true;
+    void loadHostedFlowMatches(leads).then((matches) => {
+      if (alive) hydrateHosted(matches);
+    }).catch((error) => {
+      console.warn("Hosted Booking Flow data unavailable; local workspace remains active", error);
+    });
+    return () => { alive = false; };
+  }, [leads.length, hydrateHosted]);
 
   // the queue: everyone who still needs a decision, worst first
   const queue = useMemo(() => {
@@ -247,6 +259,12 @@ export function SplitFlow({ embedded = false, focus, panelOnly = false }: { embe
               <Badge variant={lead.nextActionAt && h.sla !== "LATE" ? "outline" : "destructive"} className="text-[10px]">
                 {lead.nextActionAt ? (h.sla === "LATE" ? `late ${fmtMins(h.minutesLate)}` : new Date(lead.nextActionAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) : "no deadline"}
               </Badge>
+              {lead.hostedClaimError && <Badge variant="destructive" className="text-[10px]">claim conflict</Badge>}
+            </div>
+          )}
+          {mounted && lead.nextActionAt && (
+            <div className={cn("mt-1 text-[10px]", h?.sla === "LATE" && "font-semibold text-destructive")}>
+              Deadline {new Date(lead.nextActionAt).toLocaleString()} · {h?.sla === "LATE" ? `Overdue by ${fmtMins(h.minutesLate)}` : `Due in ${fmtMins(Math.max(1, Math.round((+new Date(lead.nextActionAt) - Date.now()) / 60000)))}`}
             </div>
           )}
           {/* Copy the number, dial it, or open the WhatsApp chat — always labelled */}

@@ -4,13 +4,21 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useBookingFlow } from "./store";
+import { phoneKey } from "@/lib/canonical/customer-id";
 
 const initials = (n: string) => n.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
 export function Capture({ onDone }: { onDone: () => void }) {
   const { rows, leads, mode, addRow, mergeRow, ignoreRow, addAllNew, resetCapture } = useBookingFlow();
   const [loaded, setLoaded] = useState(false);
-  const names = useMemo(() => new Set(leads.map((l) => l.name.toLowerCase())), [leads]);
+  const phoneCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    leads.forEach((lead) => {
+      const key = phoneKey(lead.phone);
+      if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return counts;
+  }, [leads]);
 
   const visible = loaded ? rows : [];
   const added = rows.filter((r) => r.status === "ADDED").length;
@@ -58,7 +66,8 @@ export function Capture({ onDone }: { onDone: () => void }) {
       ) : (
         <div className="overflow-hidden rounded-lg border" style={{ background: "#0b141a" }}>
           {visible.map((r) => {
-            const known = names.has(r.name.toLowerCase());
+            const phone = phoneKey(r.phone);
+            const known = Boolean(phone && phoneCounts.get(phone) === 1);
             return (
               <div key={r.id} className="flex items-center gap-3 border-b px-3 py-2.5 last:border-b-0" style={{ borderColor: "#1f2c34" }}>
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-sm font-semibold" style={{ background: "#2a3942", color: "#e9edef" }}>

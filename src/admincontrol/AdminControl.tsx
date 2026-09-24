@@ -15,7 +15,7 @@ import { ContactActions } from "@/components/common/ContactActions";
 import { SplitFlow } from "@/bf100x/SplitFlow";
 import { Ingest } from "@/vision2/Ingest";
 import { cn } from "@/lib/utils";
-import { getAdminControlData } from "@/lib/admin-control/data.functions";
+import { getAdminControlData, getAdminCustomerHistory } from "@/lib/admin-control/data.functions";
 import { assignOwner, escalateToTower, resolveRow, setNextAction } from "@/lib/admin-control/actions.functions";
 import { useControlFilters, type DayWindow, type HealthFilter } from "./filters";
 import { derive, LEAKS, type CustomerRow } from "./derive";
@@ -67,6 +67,13 @@ const ago = (t: number) => {
   return `${Math.round(m / 1440)}d ago`;
 };
 
+const dueIn = (t: number) => {
+  const m = Math.max(1, Math.round((t - Date.now()) / 60000));
+  if (m < 60) return `${m}m`;
+  if (m < 60 * 24) return `${Math.round(m / 60)}h`;
+  return `${Math.round(m / 1440)}d`;
+};
+
 export function AdminControl() {
   const f = useControlFilters();
   const viewer = useViewer();
@@ -78,6 +85,13 @@ export function AdminControl() {
     queryKey: ["admin-control-data"],
     queryFn: () => getAdminControlData(),
     staleTime: 60_000,
+  });
+
+  const customerHistory = useQuery({
+    queryKey: ["admin-customer-history", openRow?.id],
+    queryFn: () => getAdminCustomerHistory({ data: { leadId: openRow!.id } }),
+    enabled: Boolean(openRow),
+    staleTime: 30_000,
   });
 
   const allOptions = useMemo(() => scopeOptions(raw), [raw]);
@@ -652,6 +666,32 @@ export function AdminControl() {
                         (o.preview ?? "").slice(0, 40), o.label ?? "—", `${o.ocrConfidence ?? 0}%`, o.state ?? "—",
                       ])} />
                   </Card>
+                  <Card title="Hosted customer history">
+                    {customerHistory.isLoading && <p className="text-xs text-muted-foreground">Loading customer history…</p>}
+                    {customerHistory.isError && (
+                      <p className="text-xs text-destructive">
+                        Could not load customer history. {customerHistory.error instanceof Error ? customerHistory.error.message : "Try again."}
+                      </p>
+                    )}
+                    {!customerHistory.isLoading && !customerHistory.isError && customerHistory.data?.length === 0 && (
+                      <p className="text-xs text-muted-foreground">No hosted history recorded for this customer yet.</p>
+                    )}
+                    {!customerHistory.isLoading && !customerHistory.isError && customerHistory.data && customerHistory.data.length > 0 && (
+                      <div className="space-y-2">
+                        {customerHistory.data.map((item) => (
+                          <div key={`${item.source}-${item.id}`} className="rounded-md border p-2 text-xs">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-medium">{item.action}</span>
+                              <span className="text-muted-foreground">{new Date(item.at).toLocaleString()}</span>
+                            </div>
+                            <div className="mt-1 text-muted-foreground">by {item.actor || "Unknown actor"} · {item.source}</div>
+                            {item.reason && <div className="mt-1">Reason: {item.reason}</div>}
+                            {item.detail && <div className="mt-1 text-muted-foreground">{item.detail}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Card>
                 </div>
                 <div className="h-[70vh] overflow-hidden rounded-xl border bg-card">
                   <SplitFlow
@@ -773,7 +813,7 @@ function CustomerTable({ rows, onOpen }: { rows: CustomerRow[]; onOpen: (r: Cust
       <table className="w-full text-xs">
         <thead>
           <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-            {["Customer", "Contact", "Health", "Owner", "Stage", "Step", "Next action", "Last WhatsApp", "Rows", ""].map((h) => (
+            {["Customer", "Contact", "Health", "Owner", "Stage", "Step", "Next action", "Deadline", "Last WhatsApp", "Rows", ""].map((h) => (
               <th key={h} className="whitespace-nowrap px-2 py-1.5">{h}</th>
             ))}
           </tr>
@@ -798,6 +838,16 @@ function CustomerTable({ rows, onOpen }: { rows: CustomerRow[]; onOpen: (r: Cust
                     {r.nextActionKind}{r.overdueMins > 0 ? ` · overdue ${r.overdueMins}m` : ""}
                   </span>
                 ) : <span className="text-destructive">missing</span>}
+              </td>
+              <td className="px-2 py-1.5">
+                {r.nextActionAt ? (
+                  <div className={cn("whitespace-nowrap", r.overdueMins > 0 && "font-semibold text-destructive")}>
+                    <div>{new Date(r.nextActionAt).toLocaleString()}</div>
+                    <div className="text-[11px]">
+                      {r.overdueMins > 0 ? `Overdue by ${r.overdueMins}m` : `Due in ${dueIn(r.nextActionAt)}`}
+                    </div>
+                  </div>
+                ) : <span className="text-destructive">No deadline</span>}
               </td>
               <td className="whitespace-nowrap px-2 py-1.5">{ago(r.lastObsAt)}</td>
               <td className="px-2 py-1.5">{r.obsCount}</td>

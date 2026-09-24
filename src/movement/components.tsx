@@ -24,6 +24,14 @@ const rel = (iso?: string | null) => {
   return `${Math.round(m / 1440)}d`;
 };
 
+const deadlineLabel = (iso?: string | null) => {
+  if (!iso) return null;
+  const mins = Math.round((Date.now() - +new Date(iso)) / 60000);
+  if (mins > 0) return `Overdue by ${mins}m`;
+  const remaining = Math.max(1, -mins);
+  return `Due in ${remaining < 60 ? `${remaining}m` : `${Math.round(remaining / 60)}h`}`;
+};
+
 const HEALTH_CLS: Record<string, string> = {
   healthy: "bg-success/15 text-success",
   "due-soon": "bg-warning/15 text-warning",
@@ -327,6 +335,13 @@ export function WorkPanel({ ulid, meta }: { ulid: string | null; meta: Meta }) {
         <Cell label="Work">{st.work}</Cell>
         <Cell label="Next action">
           {st.nextAction ? `${st.nextAction.kind} · ${new Date(st.nextAction.dueAt).toLocaleTimeString()}` : "—"}
+        </Cell>
+        <Cell label="Deadline">
+          {st.nextAction ? (
+            <span className={cn(new Date(st.nextAction.dueAt).getTime() < Date.now() && "text-destructive")}>
+              {new Date(st.nextAction.dueAt).toLocaleString()} · {deadlineLabel(st.nextAction.dueAt)}
+            </span>
+          ) : "No deadline"}
         </Cell>
         <Cell label="Waiting">{st.customerWaitingSince ? `${rel(st.customerWaitingSince)} ago` : "—"}</Cell>
         <Cell label="Tour">{st.tourAt ? `${new Date(st.tourAt).toLocaleString()}${st.tourConfirmed ? " ✓" : " (unconfirmed)"}` : "—"}</Cell>

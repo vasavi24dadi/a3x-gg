@@ -104,6 +104,7 @@ export interface NextAction {
 
 export interface LiveLock {
   ulid: string;
+  hostedClaimId?: string;
   operatorId: string;
   operatorName: string;
   startedAt: string;
@@ -149,6 +150,10 @@ export interface MovementState {
   ulid: string;
   /** Stable customer key shared by every operating surface. */
   canonicalId: string;
+  /** Present only when this local projection maps to one hosted leads.id. */
+  hostedLeadId?: string;
+  /** The hosted next_actions row currently represented by nextAction. */
+  hostedNextActionId?: string | null;
   name?: string;
   phone?: string;
   waAccount: string;
@@ -222,7 +227,7 @@ export type MovementEventKind =
   | "prebook-eligible" | "prebook-pitched" | "prebook-interested" | "payment-intent"
   | "quote-sent" | "negotiation" | "payment-received" | "booked" | "checked-in"
   | "next-action-set" | "next-action-done" | "handoff" | "handoff-ack"
-  | "exit" | "note" | "batch-started" | "batch-ended" | "checkpoint";
+  | "exit" | "note" | "batch-started" | "batch-ended" | "checkpoint" | "hosted-history";
 
 export interface MovementEvent {
   id: string;

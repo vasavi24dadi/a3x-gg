@@ -122,6 +122,92 @@ export interface ControlData {
   loadedAt: string;
 }
 
+export interface CustomerHistoryEntry {
+  id: string;
+  at: string;
+  actor: string | null;
+  action: string;
+  reason: string | null;
+  detail: string | null;
+  source: "audit" | "timeline" | "next_action";
+}
+
+export const getAdminCustomerHistory = createServerFn({ method: "GET" })
+  .inputValidator((input: { leadId: string }) => {
+    if (!input?.leadId) throw new Error("leadId is required");
+    return input;
+  })
+  .handler(async ({ data }): Promise<CustomerHistoryEntry[]> => {
+    const db = createClient(process.env["SUPABASE_URL"]!, process.env["SUPABASE_PUBLISHABLE_KEY"]!, {
+      auth: { storage: undefined, persistSession: false, autoRefreshToken: false },
+    });
+
+    const [audit, timeline, actions] = await Promise.all([
+      db
+        .from("audit_logs")
+        .select("id, entity, entity_id, actor, action, prev, next, reason, at")
+        .eq("entity", "lead")
+        .eq("entity_id", data.leadId)
+        .order("at", { ascending: false })
+        .limit(100),
+      db
+        .from("lead_timeline")
+        .select("id, at, actor, activity, detail, next_action, deadline, new_owner, new_stage")
+        .eq("lead_id", data.leadId)
+        .order("at", { ascending: false })
+        .limit(100),
+      db
+        .from("next_actions")
+        .select("id, created_at, created_by, kind, due_at, done_at, status, notes, owner_id")
+        .eq("lead_id", data.leadId)
+        .order("created_at", { ascending: false })
+        .limit(100),
+    ]);
+
+    const failure = [audit, timeline, actions].find((result) => result.error);
+    if (failure?.error) throw new Error(failure.error.message);
+
+    const meta = (value: unknown): Record<string, unknown> =>
+      value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+
+    return [
+      ...(audit.data ?? []).map((item) => ({
+        id: item.id,
+        at: item.at,
+        actor: item.actor ?? (meta(item.prev)["by"] as string | null) ?? null,
+        action: item.action,
+        reason: item.reason,
+        detail: [meta(item.prev)["before"], meta(item.next)["after"]]
+          .filter(Boolean)
+          .map((value) => JSON.stringify(value))
+          .join(" → ") || null,
+        source: "audit" as const,
+      })),
+      ...(timeline.data ?? []).map((item) => ({
+        id: item.id,
+        at: item.at,
+        actor: item.actor,
+        action: item.activity,
+        reason: null,
+        detail: [item.detail, item.next_action && `next: ${item.next_action}`, item.deadline && `due: ${item.deadline}`, item.new_owner && `owner: ${item.new_owner}`, item.new_stage && `stage: ${item.new_stage}`]
+          .filter(Boolean)
+          .join(" · ") || null,
+        source: "timeline" as const,
+      })),
+      ...(actions.data ?? []).map((item) => ({
+        id: item.id,
+        at: item.created_at,
+        actor: item.created_by,
+        action: `Next action: ${item.kind}`,
+        reason: item.notes,
+        detail: [`due: ${item.due_at}`, item.done_at ? `done: ${item.done_at}` : `status: ${item.status}`, item.owner_id && `owner: ${item.owner_id}`]
+          .filter(Boolean)
+          .join(" · "),
+        source: "next_action" as const,
+      })),
+    ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  });
+
 export const getAdminControlData = createServerFn({ method: "GET" }).handler(async (): Promise<ControlData> => {
   const db = createClient(process.env["SUPABASE_URL"]!, process.env["SUPABASE_PUBLISHABLE_KEY"]!, {
     auth: { storage: undefined, persistSession: false, autoRefreshToken: false },

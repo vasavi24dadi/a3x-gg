@@ -5,7 +5,17 @@ import { BATCH_SIZE, HANDLERS, ROUNDS } from "./types";
 import type { Batch, CapturedRow, FlowLead, Mode, Qualification, Temp } from "./types";
 import { seedCapturedRows, seedLeads } from "./seed";
 import { JOURNEY, currentStep } from "./journey";
-import { canonicalCustomerId } from "@/lib/canonical/customer-id";
+import { canonicalCustomerId, phoneKey } from "@/lib/canonical/customer-id";
+import {
+  claimFlowLead,
+  flowEventFromLocal,
+  heartbeatFlowClaim,
+  persistFlowLead,
+  persistFlowNextAction,
+  releaseFlowClaim,
+  stagePatch,
+  type HostedFlowMatch,
+} from "./hosted";
 
 const now = () => new Date().toISOString();
 const DAY = 86_400_000;
@@ -36,6 +46,7 @@ interface State {
 
   /** bring a customer from another view (Movement OS etc.) into the booking flow */
   ensureLead: (input: { name: string; phone: string; lastMessage?: string; source?: string }) => string;
+  hydrateHosted: (matches: HostedFlowMatch[]) => void;
 
   // capture
   addRow: (rowId: string) => void;
@@ -76,7 +87,41 @@ const ev = (actor: string, label: string, detail?: string) => ({ at: now(), acto
 
 export const useBookingFlow = create<State>()(
   persist(
-    (set, get) => ({
+    (set, get) => {
+      const syncHosted = (leadId: string, activity: string, detail?: string, patch?: Record<string, unknown>) => {
+        const lead = get().leads.find((item) => item.id === leadId);
+        if (!lead?.hostedLeadId) return;
+        const event = flowEventFromLocal({ at: now(), actor: get().me, label: activity, detail });
+        void persistFlowLead({ lead, event: { ...event, activity, detail }, patch })
+          .catch((error) => console.warn("Booking Flow hosted state not synced", error));
+      };
+
+      const syncNext = (leadId: string) => {
+        const lead = get().leads.find((item) => item.id === leadId);
+        if (!lead?.hostedLeadId) return;
+        void persistFlowNextAction(lead, lead.nextAction ?? null, lead.nextActionAt ?? null)
+          .then((id) => {
+            if (id && get().leads.find((item) => item.id === leadId)?.hostedNextActionId !== id) {
+              set((s) => ({ leads: s.leads.map((item) => item.id === leadId ? { ...item, hostedNextActionId: id } : item) }));
+            }
+          })
+          .catch((error) => console.warn("Booking Flow next action not synced", error));
+      };
+
+      const syncClaimHeartbeat = (leadId: string) => {
+        const claimId = get().leads.find((item) => item.id === leadId)?.hostedClaimId;
+        if (claimId) void heartbeatFlowClaim(claimId).catch((error) => console.warn("Booking Flow claim heartbeat failed", error));
+      };
+
+      const releaseHosted = (leadId: string, reason: string) => {
+        const claimId = get().leads.find((item) => item.id === leadId)?.hostedClaimId;
+        if (!claimId) return;
+        void releaseFlowClaim(claimId, reason)
+          .then(() => set((s) => ({ leads: s.leads.map((item) => item.id === leadId ? { ...item, hostedClaimId: null } : item) })))
+          .catch((error) => console.warn("Booking Flow claim release failed", error));
+      };
+
+      return ({
       mode: "GUIDED",
       me: HANDLERS[0],
       round: 1,
@@ -88,11 +133,34 @@ export const useBookingFlow = create<State>()(
       setMe: (me) => set({ me }),
       setRound: (round) => set({ round }),
 
+      hydrateHosted: (matches) => {
+        if (!matches.length) return;
+        set((s) => ({
+          leads: s.leads.map((lead) => {
+            const match = matches.find((item) => item.localId === lead.id);
+            if (!match) return lead;
+            return {
+              ...lead,
+              hostedLeadId: match.hostedLeadId,
+              hostedNextActionId: match.hostedNextActionId,
+              owner: match.owner ?? lead.owner,
+              handler: match.owner ?? lead.handler,
+              nextAction: match.nextAction ?? lead.nextAction,
+              nextActionAt: match.nextActionAt ?? lead.nextActionAt,
+              lastMessage: match.lastMessage ?? lead.lastMessage,
+              q: match.moveInDate ? { ...lead.q, moveIn: lead.q.moveIn ?? match.moveInDate } : lead.q,
+            };
+          }),
+        }));
+      },
+
       ensureLead: ({ name, phone, lastMessage, source }) => {
         const s = get();
+        const phoneIdentity = phoneKey(phone);
+        if (!phoneIdentity) return "";
         const canonicalId = canonicalCustomerId({ phone, name });
         const found = s.leads.find((lead) =>
-          (lead.canonicalId || canonicalCustomerId({ phone: lead.phone, name: lead.name })) === canonicalId,
+          phoneKey(lead.phone) === phoneIdentity,
         );
         if (found) {
           if (!found.canonicalId) set({ leads: s.leads.map((lead) => lead.id === found.id ? { ...lead, canonicalId } : lead) });
@@ -149,7 +217,10 @@ export const useBookingFlow = create<State>()(
         set((s) => {
           const row = s.rows.find((r) => r.id === rowId);
           if (!row) return s;
-          const match = s.leads.find((l) => l.name.toLowerCase() === row.name.toLowerCase());
+          const rowPhone = phoneKey(row.phone);
+          if (!rowPhone) return s;
+          const matches = s.leads.filter((l) => phoneKey(l.phone) === rowPhone);
+          const match = matches.length === 1 ? matches[0] : undefined;
           if (!match) return s;
           return {
             rows: s.rows.map((r) => (r.id === rowId ? { ...r, status: "MERGED", leadId: match.id } : r)),
@@ -201,6 +272,12 @@ export const useBookingFlow = create<State>()(
               : l,
           ),
         });
+          for (const id of batch.leadIds) {
+            const assigned = get().leads.find((lead) => lead.id === id);
+            if (assigned?.hostedLeadId) {
+              syncHosted(id, "batch_assigned", `Given to ${handler} · round ${round}`, { current_handler_name: handler });
+            }
+          }
         return batch;
       },
 
@@ -271,7 +348,7 @@ export const useBookingFlow = create<State>()(
           }),
         })),
 
-      answerStep: (leadId, stepKey, values) =>
+      answerStep: (leadId, stepKey, values) => {
         set((s) => {
           const step = JOURNEY.find((j) => j.key === stepKey);
           if (!step) return s;
@@ -310,9 +387,16 @@ export const useBookingFlow = create<State>()(
               };
             }),
           };
-        }),
+        });
+        const lead = get().leads.find((item) => item.id === leadId);
+        const stage = stagePatch(stepKey);
+        syncHosted(leadId, `step_${stepKey.toLowerCase()}`, Object.values(values).filter(Boolean).join(" · "), stage ? { current_pipeline_stage: stage, current_mission: lead?.nextAction ?? null } : undefined);
+        syncNext(leadId);
+        const selected = JOURNEY.find((item) => item.key === stepKey)?.options?.find((item) => item.value === values[JOURNEY.find((item) => item.key === stepKey)?.field ?? ""]);
+        if (selected?.effect === "CLOSE") releaseHosted(leadId, "journey_closed");
+      },
 
-      setNext: (leadId, nextAction, nextActionAt) =>
+      setNext: (leadId, nextAction, nextActionAt) => {
         set((s) => ({
           leads: s.leads.map((l) =>
             l.id === leadId
@@ -325,9 +409,15 @@ export const useBookingFlow = create<State>()(
                 }
               : l,
           ),
-        })),
+        }));
+        syncNext(leadId);
+        syncHosted(leadId, "next_action_locked", `${nextAction} by ${new Date(nextActionAt).toLocaleString()}`, {
+          current_mission: nextAction,
+        });
+        syncClaimHeartbeat(leadId);
+      },
 
-      logActivity: (leadId, activity, note) =>
+      logActivity: (leadId, activity, note) => {
         set((s) => ({
           leads: s.leads.map((l) =>
             l.id === leadId
@@ -338,9 +428,12 @@ export const useBookingFlow = create<State>()(
                 }
               : l,
           ),
-        })),
+        }));
+        syncHosted(leadId, "activity_logged", note?.trim() || activity);
+        syncClaimHeartbeat(leadId);
+      },
 
-      editFields: (leadId, values, reason, stepKey) =>
+      editFields: (leadId, values, reason, stepKey) => {
         set((s) => ({
           leads: s.leads.map((l) => {
             if (l.id !== leadId) return l;
@@ -359,16 +452,34 @@ export const useBookingFlow = create<State>()(
               ],
             };
           }),
-        })),
+        }));
+        const patch: Record<string, unknown> = {};
+        if (values.area) patch.location_text = values.area;
+        if (values.moveIn) patch.movein_date = values.moveIn;
+        syncHosted(leadId, "answers_edited", reason, Object.keys(patch).length ? patch : undefined);
+        syncClaimHeartbeat(leadId);
+      },
 
-      claim: (leadId) =>
+      claim: (leadId) => {
+        const before = get().leads.find((item) => item.id === leadId);
+        if (!before || before.owner) return;
         set((s) => ({
           leads: s.leads.map((l) =>
-            l.id === leadId && !l.owner
-              ? { ...l, owner: s.me, handler: s.me, ownedAt: now(), events: [...l.events, ev(s.me, "Took ownership")] }
+            l.id === leadId
+              ? { ...l, owner: s.me, handler: s.me, ownedAt: now(), hostedClaimError: null, events: [...l.events, ev(s.me, "Took ownership")] }
               : l,
           ),
-        })),
+        }));
+        const optimistic = get().leads.find((item) => item.id === leadId)!;
+        if (!optimistic.hostedLeadId) return;
+        void claimFlowLead(optimistic).then((claimId) => {
+          set((s) => ({ leads: s.leads.map((l) => l.id === leadId ? { ...l, hostedClaimId: claimId, hostedClaimError: null } : l) }));
+          syncHosted(leadId, "ownership_claimed", `Claimed by ${optimistic.owner ?? get().me}`, { current_handler_name: optimistic.owner, current_mission: optimistic.nextAction ?? null });
+        }).catch((error) => {
+          const message = error instanceof Error ? error.message : "Hosted customer claim failed";
+          set((s) => ({ leads: s.leads.map((l) => l.id === leadId ? { ...l, owner: before.owner, handler: before.handler, ownedAt: before.ownedAt, hostedClaimError: message, events: [...l.events, ev(s.me, "Hosted claim failed", message)] } : l) }));
+        });
+      },
 
       toggleLabel: (leadId, label) =>
         set((s) => ({
@@ -390,17 +501,22 @@ export const useBookingFlow = create<State>()(
           ),
         })),
 
-      reassign: (leadId, handler) =>
+      reassign: (leadId, handler) => {
         set((s) => ({
           leads: s.leads.map((l) =>
             l.id === leadId ? { ...l, handler, owner: handler, events: [...l.events, ev(s.me, `Owner changed to ${handler}`)] } : l,
           ),
-        })),
+        }));
+        syncHosted(leadId, "owner_changed", `Owner changed to ${handler}`, { current_handler_name: handler });
+      },
 
-      moveStage: (leadId, stage, reason) =>
+      moveStage: (leadId, stage, reason) => {
         set((s) => ({
           leads: s.leads.map((l) => (l.id === leadId ? { ...l, stage, events: [...l.events, ev(s.me, `Moved to ${stage}`, reason)] } : l)),
-        })),
+        }));
+        const hostedStage = stagePatch(stage);
+        syncHosted(leadId, "stage_changed", reason, hostedStage ? { current_pipeline_stage: hostedStage } : undefined);
+      },
 
       bulk: (leadIds, patch, reason) =>
         set((s) => {
@@ -422,17 +538,20 @@ export const useBookingFlow = create<State>()(
           };
         }),
 
-      escalate: (leadId, reason) =>
+      escalate: (leadId, reason) => {
         set((s) => ({
           leads: s.leads.map((l) =>
             l.id === leadId
               ? { ...l, escalated: true, stage: "CONTROL_TOWER", events: [...l.events, ev(s.me, "Sent to Control Tower", reason)] }
               : l,
           ),
-        })),
+        }));
+        syncHosted(leadId, "escalated", reason, { current_handler_name: "Control Tower", primary_blocker: reason, current_pipeline_stage: "CONTROL_TOWER" });
+      },
 
       reset: () => set({ rows: seedCapturedRows(), leads: seedLeads(), batches: [] }),
-    }),
+      });
+    },
     { name: "gharpayy-booking-flow-v2", version: 2 },
   ),
 );
