@@ -9,6 +9,29 @@ import {
 
 export function MovementOS() {
   useEffect(() => { seedMovement(); }, []);
+  // If persisted movement store was hydrated as empty, ensure local identity leads
+  // are materialised into movement state so the UI shows demo customers.
+  useEffect(() => {
+    try {
+      // lazy access to avoid bundler/ssr issues
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const m = require("./store").useMovement;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const identity = require("@/lib/lead-identity/store").useIdentityStore;
+      const ensureMany = m.getState().ensureMany;
+      const states = Object.keys(m.getState().states || {});
+      if (states.length === 0) {
+        const leads = identity.getState().leads || [];
+        if (leads.length) {
+          ensureMany(
+            leads.map((l: any) => ({ ulid: l.ulid, name: l.name, phone: l.phoneE164 || l.phoneRaw, ownerId: l.assigneeId ?? l.primaryOwnerId ?? "", ownerName: l.assigneeName ?? "Unassigned", unread: 0, lastCustomerMsgAt: l.lastActivityAt ?? l.updatedAt, checkInDate: l.earliestCheckIn ?? l.moveInDate ?? null })),
+          );
+        }
+      }
+    } catch (e) {
+      // keep silent — non-fatal
+    }
+  }, []);
   const { list, nameOf, me } = useMovementSync();
   const [selected, setSelected] = useState<string | null>(null);
 

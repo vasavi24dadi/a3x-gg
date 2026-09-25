@@ -1,7 +1,7 @@
 // Admin Draft Control room — one place that governs the whole chain:
 // WhatsApp screenshot -> row -> customer -> owner -> work batch -> next action -> booking.
 // Filters at the top apply to every tab and are remembered between visits.
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -16,6 +16,7 @@ import { SplitFlow } from "@/bf100x/SplitFlow";
 import { Ingest } from "@/vision2/Ingest";
 import { cn } from "@/lib/utils";
 import { getAdminControlData, getAdminCustomerHistory } from "@/lib/admin-control/data.functions";
+import { supabase as supabaseClient } from "@/integrations/supabase/client";
 import { assignOwner, escalateToTower, resolveRow, setNextAction } from "@/lib/admin-control/actions.functions";
 import { useControlFilters, type DayWindow, type HealthFilter } from "./filters";
 import { derive, LEAKS, type CustomerRow } from "./derive";
@@ -81,11 +82,18 @@ export function AdminControl() {
   const [tab, setTab] = useState("command");
   const [openRow, setOpenRow] = useState<CustomerRow | null>(null);
 
-  const { data: raw, isLoading, isError, error, refetch, isFetching } = useQuery({
+  // Admin page should load regardless of client auth session presence.
+
+  const query = useQuery({
     queryKey: ["admin-control-data"],
     queryFn: () => getAdminControlData(),
+    enabled: typeof window !== "undefined",
     staleTime: 60_000,
   });
+  // When no session exists the serverFn will be blocked by auth middleware.
+  // Keep the UI non-fatal and show a clear hint rather than an empty table.
+
+  const { data: raw, isLoading, isError, error, refetch, isFetching } = query;
 
   const customerHistory = useQuery({
     queryKey: ["admin-customer-history", openRow?.id],
@@ -638,6 +646,8 @@ export function AdminControl() {
                       <Row k="Who owns it" v={openRow.handler} />
                       <Row k="Journey step" v={`${openRow.journeyStep} (${openRow.journeyIndex})`} />
                       <Row k="Conversation type" v={openRow.bucket} />
+                      <Row k="Status" v={openRow.status || "—"} />
+                      <Row k="Blocker" v={openRow.blocker || "—"} />
                       <Row k="Next action" v={openRow.nextActionKind ? `${openRow.nextActionKind} · ${openRow.overdueMins > 0 ? `overdue ${openRow.overdueMins}m` : "due later"}` : "missing"} />
                       <Row k="Last WhatsApp" v={ago(openRow.lastObsAt)} />
                       <Row k="Last CRM action" v={ago(openRow.lastActionAt)} />
@@ -821,7 +831,7 @@ function CustomerTable({ rows, onOpen }: { rows: CustomerRow[]; onOpen: (r: Cust
       <table className="w-full text-xs">
         <thead>
           <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-            {["Customer", "Contact", "Health", "Owner", "Stage", "Step", "Next action", "Deadline", "Last WhatsApp", "Rows", ""].map((h) => (
+            {["Customer", "Contact", "Health", "Owner", "Stage", "Step", "Next action", "Deadline", "Last WhatsApp", "Rows", "Blocker", ""].map((h) => (
               <th key={h} className="whitespace-nowrap px-2 py-1.5">{h}</th>
             ))}
           </tr>
@@ -859,6 +869,7 @@ function CustomerTable({ rows, onOpen }: { rows: CustomerRow[]; onOpen: (r: Cust
               </td>
               <td className="whitespace-nowrap px-2 py-1.5">{ago(r.lastObsAt)}</td>
               <td className="px-2 py-1.5">{r.obsCount}</td>
+              <td className="px-2 py-1.5">{r.blocker ?? "—"}</td>
               <td className="px-2 py-1.5">
                 <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => onOpen(r)}>Open</Button>
               </td>

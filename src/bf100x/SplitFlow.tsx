@@ -70,6 +70,23 @@ export interface SplitFocus { name?: string; phone?: string; key?: string; canon
 
 export function SplitFlow({ embedded = false, focus, panelOnly = false }: { embedded?: boolean; focus?: SplitFocus; panelOnly?: boolean }) {
   const { leads, me, mode, setMode, claim, setNext, logActivity, escalate, batches, buildBatch, closeBatch, reopenBatch, hydrateHosted } = useBookingFlow();
+  // If persisted booking-flow leads are an explicit empty array (overriding seed), reset to seeded leads.
+  useEffect(() => {
+    try {
+      // lazy require to avoid SSR/bundler issues
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const store = require("@/bookingflow/store").useBookingFlow;
+      const current = store.getState();
+      if (Array.isArray(current.leads) && current.leads.length === 0) {
+        // reset leads to deterministic seed without touching external CRM
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const seed = require("../bookingflow/seed");
+        store.setState({ leads: seed.seedLeads(), rows: seed.seedCapturedRows(), batches: [] });
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
   const [widthPct, setWidthPct] = useState(40);
   const [dragging, setDragging] = useState(false);
   const [closeNote, setCloseNote] = useState("");

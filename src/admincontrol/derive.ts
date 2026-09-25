@@ -23,6 +23,8 @@ export interface CustomerRow {
   phone: string;
   zone: string;
   stage: string;
+  status: string;
+  blocker?: string | null;
   journeyStep: string;
   journeyIndex: number;
   bucket: string;
@@ -198,6 +200,8 @@ export function derive(data: ControlData, f: ControlFilters): Derived {
       phone: l.phone ?? "",
       zone: l.zone ?? "—",
       stage: l.stage ?? "NEW",
+      status: l.status ?? "",
+      blocker: l.blocker ?? null,
       journeyStep: l.journeyStep ?? "—",
       journeyIndex: l.journeyIndex ?? 0,
       bucket: l.bucket ?? obs[0]?.bucket ?? "—",
