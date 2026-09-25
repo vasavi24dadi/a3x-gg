@@ -44,11 +44,7 @@ const modules = [
     where: "/movement-os",
     does: "The full customer list with stages, owners, overdue work and the work panel beside it.",
   },
-  {
-    name: "Admin Movement Control",
-    where: "/admin",
-    does: "Founder and team views: who is doing what, what is late, where money is leaking, and the full history.",
-  },
+  // Admin Movement Control removed from the recommended modules list for this submission.
   {
     name: "Closing desk",
     where: "/closing",
@@ -316,9 +312,8 @@ One customer walkthrough: <name, and the trail of who/what/when>`}</pre>
             {[
               { to: "/leads", label: "Leads" },
               { to: "/movement-care", label: "Movement CARE" },
-              { to: "/booking-flow-split", label: "Booking Flow Split" },
-              { to: "/closing", label: "Closing desk" },
-              { to: "/admin", label: "Admin control" },
+                { to: "/booking-flow-split", label: "Booking Flow Split" },
+                { to: "/closing", label: "Closing desk" },
             ].map((l) => (
               <Link
                 key={l.to}
